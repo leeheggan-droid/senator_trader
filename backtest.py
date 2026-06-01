@@ -42,17 +42,9 @@ MIN_PRICE      = 5.0    # ignore penny stocks
 TOP_N_DEFAULT  = 15     # senators to include in portfolio simulation
 SIM_POSITION   = 5_000  # $ per position in portfolio simulation
 
-# Data sources — tried in order until one returns valid JSON
-# Senate Stock Watcher S3 has access restrictions from some regions;
-# Capitol Trades API is a reliable fallback.
-SENATE_URLS = [
-    "http://senate-stock-watcher-data.s3-website-us-west-2.amazonaws.com/aggregate/all_transactions.json",
-    "https://senate-stock-watcher-data.s3.us-west-2.amazonaws.com/aggregate/all_transactions.json",
-]
-HOUSE_URLS = [
-    "http://house-stock-watcher-data.s3-website-us-west-2.amazonaws.com/data/all_transactions.json",
-    "https://house-stock-watcher-data.s3.us-west-2.amazonaws.com/data/all_transactions.json",
-]
+# Quiver Quantitative — free API, sign up at https://www.quiverquant.com/
+# Set via --api-key argument or QUIVER_API_KEY environment variable.
+QUIVER_URL = "https://api.quiverquant.com/beta/bulk/congresstrading"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; senator-backtest/1.0)",
     "Accept": "application/json, */*",
@@ -69,53 +61,31 @@ KNOWN_ETFS = frozenset({
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
-def _fetch_json(urls: list[str], cache_name: str) -> list:
+def _fetch_quiver(api_key: str) -> list:
+    """Fetch all congressional trades from Quiver Quantitative bulk endpoint."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = CACHE_DIR / f"{cache_name}.json"
-    if cache_file.exists() and cache_file.stat().st_size > 1000:
+    cache_file = CACHE_DIR / "quiver_congress.json"
+    if cache_file.exists() and cache_file.stat().st_size > 10_000:
         try:
             data = json.loads(cache_file.read_text())
             if data:
-                print(f"  Using cached {cache_name} ({len(data)} records)", flush=True)
+                print(f"  Using cached Quiver data ({len(data)} records)", flush=True)
                 return data
         except Exception:
             pass
-    for url in urls:
-        try:
-            print(f"  Trying {url[:80]} …", flush=True)
-            # First request without following redirects so we can inspect them
-            r0 = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=False)
-            if r0.status_code in (301, 302, 307, 308):
-                redirect = r0.headers.get("Location", "")
-                print(f"    Redirect → {redirect[:80]}", flush=True)
-                resp = requests.get(redirect, headers=HEADERS, timeout=20, allow_redirects=True)
-            else:
-                resp = r0
-            print(f"    HTTP {resp.status_code}, content-length={len(resp.content)}", flush=True)
-            if resp.status_code != 200:
-                print(f"    → skip (non-200)")
-                continue
-            text = resp.text.strip()
-            if not text or text[0] not in ("[", "{"):
-                print(f"    → skip (not JSON, starts with: {text[:80]!r})")
-                continue
-            data = resp.json()
-            if not isinstance(data, list) or len(data) == 0:
-                print(f"    → skip (empty list or wrong format)")
-                continue
-            print(f"    ✓ {len(data)} records", flush=True)
-            cache_file.write_text(json.dumps(data))
-            return data
-        except requests.exceptions.Timeout:
-            print(f"    → timeout after 20s — trying next URL")
-        except Exception as exc:
-            print(f"    → failed: {exc}")
-    raise RuntimeError(
-        f"All URLs failed for {cache_name}.\n"
-        f"Download manually and place at: {cache_file}\n"
-        f"Senate data: https://senate-stock-watcher-data.s3-us-east-2.amazonaws.com/aggregate/all_transactions.json\n"
-        f"House data:  https://house-stock-watcher-data.s3-us-east-2.amazonaws.com/data/all_transactions.json"
-    )
+    print(f"  Fetching from Quiver Quantitative …", flush=True)
+    hdrs = {**HEADERS, "Authorization": f"Token {api_key}"}
+    resp = requests.get(QUIVER_URL, headers=hdrs, timeout=60)
+    if resp.status_code == 401:
+        raise RuntimeError(
+            "Quiver API key invalid or missing.\n"
+            "Sign up free at https://www.quiverquant.com/ then pass --api-key YOUR_TOKEN"
+        )
+    resp.raise_for_status()
+    data = resp.json()
+    print(f"  ✓ {len(data)} records from Quiver", flush=True)
+    cache_file.write_text(json.dumps(data))
+    return data
 
 
 def _parse_amount(s: str) -> float:
@@ -147,72 +117,52 @@ def _parse_date(s: str) -> date | None:
         return None
 
 
-def load_disclosures(chamber: str = "both") -> pd.DataFrame:
+def load_disclosures(api_key: str, chamber: str = "both") -> pd.DataFrame:
+    """Load congressional buy disclosures from Quiver Quantitative.
+
+    Quiver's bulk endpoint returns all trades for both chambers.
+    Schema (key fields):
+      Ticker, Name, Date, Transaction, Range, House (Senate/House)
+    """
+    raw = _fetch_quiver(api_key)
     rows = []
-
-    if chamber in ("senate", "both"):
-        try:
-            senate_raw = _fetch_json(SENATE_URLS, "senate_all")
-            for r in senate_raw:
-                txn = str(r.get("type", "")).lower()
-                if "purchase" not in txn and "buy" not in txn:
-                    continue
-                sym = str(r.get("ticker", "")).strip().upper()
-                if not sym or sym in ("N/A", "--", "NONE") or len(sym) > 5:
-                    continue
-                if sym in KNOWN_ETFS:
-                    continue
-                disclosure_dt = _parse_date(r.get("disclosure_date", "") or r.get("transaction_date", ""))
-                transaction_dt = _parse_date(r.get("transaction_date", ""))
-                if not disclosure_dt:
-                    continue
-                rows.append({
-                    "symbol":          sym,
-                    "member":          str(r.get("senator", "")).strip(),
-                    "chamber":         "senate",
-                    "transaction_date": transaction_dt,
-                    "disclosure_date": disclosure_dt,
-                    "amount_mid":      _parse_amount(str(r.get("amount", ""))),
-                })
-            print(f"  Senate: {len([r for r in rows if r['chamber']=='senate'])} buy disclosures loaded")
-        except Exception as e:
-            print(f"  Senate fetch failed: {e}", file=sys.stderr)
-
-    if chamber in ("house", "both"):
-        before = len(rows)
-        try:
-            house_raw = _fetch_json(HOUSE_URLS, "house_all")
-            for r in house_raw:
-                txn = str(r.get("type", "")).lower()
-                if "purchase" not in txn and "buy" not in txn:
-                    continue
-                sym = str(r.get("ticker", "")).strip().upper()
-                if not sym or sym in ("N/A", "--", "NONE") or len(sym) > 5:
-                    continue
-                if sym in KNOWN_ETFS:
-                    continue
-                disclosure_dt = _parse_date(r.get("disclosure_date", "") or r.get("transaction_date", ""))
-                transaction_dt = _parse_date(r.get("transaction_date", ""))
-                if not disclosure_dt:
-                    continue
-                rows.append({
-                    "symbol":          sym,
-                    "member":          str(r.get("representative", "")).strip(),
-                    "chamber":         "house",
-                    "transaction_date": transaction_dt,
-                    "disclosure_date": disclosure_dt,
-                    "amount_mid":      _parse_amount(str(r.get("amount", ""))),
-                })
-            print(f"  House: {len(rows) - before} buy disclosures loaded")
-        except Exception as e:
-            print(f"  House fetch failed: {e}", file=sys.stderr)
+    for r in raw:
+        txn = str(r.get("Transaction", "")).lower()
+        if "purchase" not in txn and "buy" not in txn:
+            continue
+        sym = str(r.get("Ticker", "")).strip().upper()
+        if not sym or sym in ("N/A", "--", "NONE") or len(sym) > 5:
+            continue
+        if sym in KNOWN_ETFS:
+            continue
+        ch = str(r.get("House", "")).lower()
+        if chamber == "senate" and "senate" not in ch:
+            continue
+        if chamber == "house" and "house" not in ch:
+            continue
+        # Quiver uses the transaction date (disclosure lag already baked in
+        # by the ENTRY_LAG_DAYS parameter — we buy 7 days after this date)
+        disc_dt = _parse_date(str(r.get("Date", "")))
+        if not disc_dt:
+            continue
+        rows.append({
+            "symbol":          sym,
+            "member":          str(r.get("Name", "")).strip(),
+            "chamber":         "senate" if "senate" in ch else "house",
+            "transaction_date": disc_dt,
+            "disclosure_date": disc_dt,
+            "amount_mid":      _parse_amount(str(r.get("Range", ""))),
+        })
 
     if not rows:
-        raise RuntimeError("No disclosures loaded — all data sources failed. Check network/URLs.")
+        raise RuntimeError("No buy disclosures found in Quiver data.")
     df = pd.DataFrame(rows)
     df = df[df["amount_mid"] >= MIN_TRADE_USD].copy()
     df["disclosure_date"] = pd.to_datetime(df["disclosure_date"])
     df = df.sort_values("disclosure_date")
+    senate_n = (df["chamber"] == "senate").sum()
+    house_n  = (df["chamber"] == "house").sum()
+    print(f"  Senate: {senate_n}  House: {house_n}  total buy disclosures loaded")
     return df
 
 
@@ -376,6 +326,9 @@ def simulate_portfolio(results: pd.DataFrame, top_members: list[str],
 
 def main():
     parser = argparse.ArgumentParser(description="Senator trade disclosure backtest")
+    parser.add_argument("--api-key", default=os.environ.get("QUIVER_API_KEY", ""),
+                        help="Quiver Quantitative API token (or set QUIVER_API_KEY env var). "
+                             "Free signup at https://www.quiverquant.com/")
     parser.add_argument("--top",     type=int, default=TOP_N_DEFAULT, help="Show top N members")
     parser.add_argument("--from",    dest="from_year", type=int, default=2020)
     parser.add_argument("--chamber", choices=["senate","house","both"], default="both")
@@ -390,8 +343,15 @@ def main():
     print(f"{'='*65}\n")
 
     # ── 1. Load disclosures ───────────────────────────────────────────────────
+    if not args.api_key:
+        print("\nERROR: Quiver Quantitative API key required.")
+        print("  1. Sign up free at https://www.quiverquant.com/")
+        print("  2. Run:  venv/bin/python backtest.py --api-key YOUR_TOKEN --save")
+        print("  Or set env:  export QUIVER_API_KEY=YOUR_TOKEN")
+        sys.exit(1)
+
     print("Step 1: Loading congressional disclosures…")
-    df = load_disclosures(chamber=args.chamber)
+    df = load_disclosures(args.api_key, chamber=args.chamber)
     print(f"  {len(df)} qualifying buy disclosures (≥${MIN_TRADE_USD:,})\n")
 
     # ── 2. Fetch prices ───────────────────────────────────────────────────────
