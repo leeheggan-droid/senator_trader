@@ -117,7 +117,7 @@ def _seen_key(member: str, symbol: str, trade_date: str) -> str:
 def _log_trade(event: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(TRADE_LOG_FILE, "a") as f:
-        f.write(json.dumps({**event, "logged_at": datetime.utcnow().isoformat()}) + "\n")
+        f.write(json.dumps({**event, "logged_at": datetime.now().isoformat()}) + "\n")
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────
@@ -176,7 +176,8 @@ def place_buy(tc, symbol: str, notional: float, dry_run: bool = False) -> Option
     oid = f"SEN-{uuid.uuid4().hex[:10]}"
 
     if dry_run:
-        log.info("[DRY RUN] Would buy %s qty=%d @ ~$%.2f (notional $%,.0f)", symbol, qty, price, qty * price)
+        notional = qty * price
+        log.info("[DRY RUN] Would buy %s qty=%d @ $%.2f (notional $%.0f)", symbol, qty, price, notional)
         return {"order_id": oid, "qty": qty, "entry_px": price, "dry_run": True}
 
     try:
