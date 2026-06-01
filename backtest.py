@@ -85,7 +85,14 @@ def _fetch_json(urls: list[str], cache_name: str) -> list:
     for url in urls:
         try:
             print(f"  Trying {url[:80]} …", flush=True)
-            resp = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+            # First request without following redirects so we can inspect them
+            r0 = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=False)
+            if r0.status_code in (301, 302, 307, 308):
+                redirect = r0.headers.get("Location", "")
+                print(f"    Redirect → {redirect[:80]}", flush=True)
+                resp = requests.get(redirect, headers=HEADERS, timeout=20, allow_redirects=True)
+            else:
+                resp = r0
             print(f"    HTTP {resp.status_code}, content-length={len(resp.content)}", flush=True)
             if resp.status_code != 200:
                 print(f"    → skip (non-200)")
