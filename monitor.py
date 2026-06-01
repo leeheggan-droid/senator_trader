@@ -446,9 +446,12 @@ def main() -> None:
         else:
             seen.add(sig["seen_key"])
 
-    # ── 3. Save state ──────────────────────────────────────────────────────
-    save_positions(positions)
-    save_seen(seen)
+    # ── 3. Save state (skipped in dry-run) ────────────────────────────────
+    if not dry:
+        save_positions(positions)
+        save_seen(seen)
+    else:
+        log.info("[DRY RUN] State not saved — re-run with --dry-run freely")
 
     # ── 4. Daily summary ───────────────────────────────────────────────────
     log.info("Open positions after run: %d", len(positions))
