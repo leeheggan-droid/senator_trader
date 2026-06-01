@@ -38,7 +38,7 @@ import yfinance as yf
 ENTRY_LAG_DAYS = 7      # trading days after disclosure before we enter
 HOLD_DAYS      = 30     # calendar days to hold
 STOP_PCT       = 0.10   # stop loss at 10% below entry
-MIN_TRADE_USD  = 0      # temporarily 0 to see raw data volume; raise to 15_001 after
+MIN_TRADE_USD  = 1_000  # $1k floor — catches all meaningful disclosed trades
 MIN_PRICE      = 5.0    # ignore penny stocks
 TOP_N_DEFAULT  = 15     # senators to include in portfolio simulation
 SIM_POSITION   = 5_000  # $ per position in portfolio simulation
@@ -73,8 +73,8 @@ def _rapidapi_headers(api_key: str) -> dict:
     }
 
 
-def _fetch_by_type(api_key: str, trade_type: str = "purchase") -> list:
-    """Fetch all trades of a given type across both chambers — one API call."""
+def _fetch_by_type(api_key: str, trade_type: str = "buy", max_pages: int = 10) -> list:
+    """Fetch all trades of a given type, paginated. Cached after first successful fetch."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file = CACHE_DIR / f"trades_type_{trade_type}.json"
     if cache_file.exists() and cache_file.stat().st_size > 5_000:
@@ -85,41 +85,65 @@ def _fetch_by_type(api_key: str, trade_type: str = "purchase") -> list:
                 return data
         except Exception:
             pass
-    print(f"  Fetching {trade_type} trades from Politician Trade Tracker …", flush=True)
-    resp = requests.get(
-        TRADES_BY_TYPE_URL,
-        headers=_rapidapi_headers(api_key),
-        params={"trade_type": trade_type, "limit": 10000},
-        timeout=60,
-    )
-    if resp.status_code == 401:
-        raise RuntimeError("API key invalid — re-run with --api-key KEY")
-    if resp.status_code == 429:
-        raise RuntimeError("Rate limit hit — 60 requests/month on free tier.")
-    resp.raise_for_status()
-    data = resp.json()
-    if isinstance(data, dict):
-        data = data.get("trades", data.get("data", data.get("results", [])))
-    if not isinstance(data, list):
-        raise RuntimeError(f"Unexpected format: {type(data)} — {str(data)[:200]}")
-    if len(data) == 0:
-        print(f"  WARNING: 0 records returned. Raw response: {resp.text[:300]}", flush=True)
-    else:
-        print(f"  ✓ {len(data)} {trade_type} records", flush=True)
-        cache_file.write_text(json.dumps(data))
-    return data
+
+    all_records: list = []
+    page = 1
+    page_size = 96  # observed default
+    print(f"  Fetching {trade_type} trades (up to {max_pages} pages) …", flush=True)
+
+    while page <= max_pages:
+        resp = requests.get(
+            TRADES_BY_TYPE_URL,
+            headers=_rapidapi_headers(api_key),
+            params={"trade_type": trade_type, "page": page},
+            timeout=60,
+        )
+        if resp.status_code == 401:
+            raise RuntimeError("API key invalid — re-run with --api-key KEY")
+        if resp.status_code == 429:
+            print(f"  Rate limit hit on page {page} — saving {len(all_records)} records so far")
+            break
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict):
+            data = data.get("trades", data.get("data", data.get("results", [])))
+        if not isinstance(data, list) or len(data) == 0:
+            break  # no more pages
+        all_records.extend(data)
+        print(f"  Page {page}: {len(data)} records (total so far: {len(all_records)})", flush=True)
+        if len(data) < page_size:
+            break  # last page
+        page += 1
+
+    print(f"  ✓ {len(all_records)} total {trade_type} records across {page} page(s)", flush=True)
+    if all_records:
+        cache_file.write_text(json.dumps(all_records))
+    return all_records
 
 
 def _parse_amount(s: str) -> float:
+    """Parse trade amount ranges to midpoint USD.
+
+    Handles: '1K-15K', '15K-50K', '500K-1M', '1M+',
+             '$15,001 - $50,000', plain numbers.
+    """
     if not s:
         return 0.0
-    clean = s.replace("$","").replace(",","").strip()
-    parts = [p.strip() for p in clean.split("-") if p.strip()]
+
+    def _expand(tok: str) -> float:
+        tok = tok.replace("$", "").replace(",", "").strip().rstrip("+")
+        if tok.upper().endswith("M"):
+            return float(tok[:-1]) * 1_000_000
+        if tok.upper().endswith("K"):
+            return float(tok[:-1]) * 1_000
+        return float(tok)
+
+    parts = [p.strip() for p in s.split("-") if p.strip()]
     nums = []
     for p in parts:
         try:
-            nums.append(float(p))
-        except ValueError:
+            nums.append(_expand(p))
+        except (ValueError, IndexError):
             pass
     return sum(nums) / len(nums) if nums else 0.0
 
@@ -395,7 +419,7 @@ def main():
     parser.add_argument("--top",     type=int, default=TOP_N_DEFAULT, help="Show top N members")
     parser.add_argument("--from",    dest="from_year", type=int, default=2020)
     parser.add_argument("--chamber", choices=["senate","house","both"], default="both")
-    parser.add_argument("--min-trades", type=int, default=5)
+    parser.add_argument("--min-trades", type=int, default=2)
     parser.add_argument("--save",    action="store_true", help="Save results to CSV")
     args = parser.parse_args()
 
