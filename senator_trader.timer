@@ -1,0 +1,10 @@
+[Unit]
+Description=Senator Trade Monitor — daily at 14:30 UTC (09:30 ET)
+Requires=senator_trader.service
+
+[Timer]
+OnCalendar=*-*-* 14:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
