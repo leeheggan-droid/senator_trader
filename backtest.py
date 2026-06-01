@@ -42,9 +42,11 @@ MIN_PRICE      = 5.0    # ignore penny stocks
 TOP_N_DEFAULT  = 15     # senators to include in portfolio simulation
 SIM_POSITION   = 5_000  # $ per position in portfolio simulation
 
-# Quiver Quantitative — free API, sign up at https://www.quiverquant.com/
-# Set via --api-key argument or QUIVER_API_KEY environment variable.
-QUIVER_URL = "https://api.quiverquant.com/beta/bulk/congresstrading"
+# Politician Trade Tracker via RapidAPI
+# Sign up free (60 req/mo) at https://www.politiciantradetracker.us/
+# Set via --api-key or RAPIDAPI_KEY env var.
+RAPIDAPI_HOST = "politician-trade-tracker1.p.rapidapi.com"
+TRADES_BY_CHAMBER_URL = f"https://{RAPIDAPI_HOST}/trades/chamber"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; senator-backtest/1.0)",
     "Accept": "application/json, */*",
@@ -61,29 +63,47 @@ KNOWN_ETFS = frozenset({
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
-def _fetch_quiver(api_key: str) -> list:
-    """Fetch all congressional trades from Quiver Quantitative bulk endpoint."""
+def _rapidapi_headers(api_key: str) -> dict:
+    return {
+        **HEADERS,
+        "x-rapidapi-key":  api_key,
+        "x-rapidapi-host": RAPIDAPI_HOST,
+    }
+
+
+def _fetch_chamber(api_key: str, chamber: str) -> list:
+    """Fetch all trades for one chamber, with cache."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = CACHE_DIR / "quiver_congress.json"
-    if cache_file.exists() and cache_file.stat().st_size > 10_000:
+    cache_file = CACHE_DIR / f"trades_{chamber}.json"
+    if cache_file.exists() and cache_file.stat().st_size > 5_000:
         try:
             data = json.loads(cache_file.read_text())
             if data:
-                print(f"  Using cached Quiver data ({len(data)} records)", flush=True)
+                print(f"  Using cached {chamber} data ({len(data)} records)", flush=True)
                 return data
         except Exception:
             pass
-    print(f"  Fetching from Quiver Quantitative …", flush=True)
-    hdrs = {**HEADERS, "Authorization": f"Token {api_key}"}
-    resp = requests.get(QUIVER_URL, headers=hdrs, timeout=60)
+    print(f"  Fetching {chamber} trades from Politician Trade Tracker …", flush=True)
+    resp = requests.get(
+        TRADES_BY_CHAMBER_URL,
+        headers=_rapidapi_headers(api_key),
+        params={"chamber": chamber},
+        timeout=60,
+    )
     if resp.status_code == 401:
         raise RuntimeError(
-            "Quiver API key invalid or missing.\n"
-            "Sign up free at https://www.quiverquant.com/ then pass --api-key YOUR_TOKEN"
+            "API key invalid — check your RapidAPI key and re-run with --api-key KEY"
         )
+    if resp.status_code == 429:
+        raise RuntimeError("Rate limit hit — 60 requests/month on free tier. Try again tomorrow.")
     resp.raise_for_status()
     data = resp.json()
-    print(f"  ✓ {len(data)} records from Quiver", flush=True)
+    # API may return a dict with a list inside, or a bare list
+    if isinstance(data, dict):
+        data = data.get("trades", data.get("data", data.get("results", [])))
+    if not isinstance(data, list):
+        raise RuntimeError(f"Unexpected response format: {type(data)} — {str(data)[:200]}")
+    print(f"  ✓ {len(data)} {chamber} records", flush=True)
     cache_file.write_text(json.dumps(data))
     return data
 
@@ -117,52 +137,84 @@ def _parse_date(s: str) -> date | None:
         return None
 
 
-def load_disclosures(api_key: str, chamber: str = "both") -> pd.DataFrame:
-    """Load congressional buy disclosures from Quiver Quantitative.
+def _normalise_record(r: dict, chamber_label: str) -> dict | None:
+    """Normalise one trade record from Politician Trade Tracker.
 
-    Quiver's bulk endpoint returns all trades for both chambers.
-    Schema (key fields):
-      Ticker, Name, Date, Transaction, Range, House (Senate/House)
+    The API field names are discovered from the first real response.
+    Common patterns tried: ticker/symbol, politician/name/senator,
+    transaction_date/date/filed_at, type/transaction, amount/range.
     """
-    raw = _fetch_quiver(api_key)
+    # Symbol
+    sym = str(r.get("ticker") or r.get("symbol") or r.get("asset_ticker") or "").strip().upper()
+    if not sym or sym in ("N/A", "--", "NONE") or len(sym) > 5:
+        return None
+    if sym in KNOWN_ETFS:
+        return None
+
+    # Transaction type — keep only purchases
+    txn = str(r.get("type") or r.get("transaction") or r.get("transaction_type") or "").lower()
+    if "purchase" not in txn and "buy" not in txn:
+        return None
+
+    # Politician name
+    name = str(
+        r.get("politician") or r.get("name") or r.get("senator") or
+        r.get("representative") or r.get("member") or ""
+    ).strip()
+
+    # Date (use disclosure date if available, else transaction date)
+    date_str = str(
+        r.get("disclosure_date") or r.get("filed_at") or
+        r.get("transaction_date") or r.get("date") or ""
+    )
+    disc_dt = _parse_date(date_str)
+    if not disc_dt:
+        return None
+
+    # Amount
+    amount_str = str(r.get("amount") or r.get("range") or r.get("estimated_value") or "")
+    amount_mid = _parse_amount(amount_str)
+
+    return {
+        "symbol":          sym,
+        "member":          name,
+        "chamber":         chamber_label,
+        "transaction_date": disc_dt,
+        "disclosure_date": disc_dt,
+        "amount_mid":      amount_mid,
+    }
+
+
+def load_disclosures(api_key: str, chamber: str = "both") -> pd.DataFrame:
+    chambers = []
+    if chamber in ("senate", "both"):
+        chambers.append(("Senate", "senate"))
+    if chamber in ("house", "both"):
+        chambers.append(("House", "house"))
+
     rows = []
-    for r in raw:
-        txn = str(r.get("Transaction", "")).lower()
-        if "purchase" not in txn and "buy" not in txn:
-            continue
-        sym = str(r.get("Ticker", "")).strip().upper()
-        if not sym or sym in ("N/A", "--", "NONE") or len(sym) > 5:
-            continue
-        if sym in KNOWN_ETFS:
-            continue
-        ch = str(r.get("House", "")).lower()
-        if chamber == "senate" and "senate" not in ch:
-            continue
-        if chamber == "house" and "house" not in ch:
-            continue
-        # Quiver uses the transaction date (disclosure lag already baked in
-        # by the ENTRY_LAG_DAYS parameter — we buy 7 days after this date)
-        disc_dt = _parse_date(str(r.get("Date", "")))
-        if not disc_dt:
-            continue
-        rows.append({
-            "symbol":          sym,
-            "member":          str(r.get("Name", "")).strip(),
-            "chamber":         "senate" if "senate" in ch else "house",
-            "transaction_date": disc_dt,
-            "disclosure_date": disc_dt,
-            "amount_mid":      _parse_amount(str(r.get("Range", ""))),
-        })
+    for api_chamber, label in chambers:
+        raw = _fetch_chamber(api_key, api_chamber)
+        if raw:
+            # Print first record so we can see the actual field names
+            print(f"  Sample {label} record keys: {list(raw[0].keys())[:12]}", flush=True)
+        for r in raw:
+            norm = _normalise_record(r, label)
+            if norm:
+                rows.append(norm)
 
     if not rows:
-        raise RuntimeError("No buy disclosures found in Quiver data.")
+        raise RuntimeError(
+            "No buy disclosures found. Check the sample record keys above "
+            "and update _normalise_record() if field names differ."
+        )
     df = pd.DataFrame(rows)
     df = df[df["amount_mid"] >= MIN_TRADE_USD].copy()
     df["disclosure_date"] = pd.to_datetime(df["disclosure_date"])
     df = df.sort_values("disclosure_date")
     senate_n = (df["chamber"] == "senate").sum()
     house_n  = (df["chamber"] == "house").sum()
-    print(f"  Senate: {senate_n}  House: {house_n}  total buy disclosures loaded")
+    print(f"  Senate buys: {senate_n}  House buys: {house_n}", flush=True)
     return df
 
 
@@ -326,9 +378,10 @@ def simulate_portfolio(results: pd.DataFrame, top_members: list[str],
 
 def main():
     parser = argparse.ArgumentParser(description="Senator trade disclosure backtest")
-    parser.add_argument("--api-key", default=os.environ.get("QUIVER_API_KEY", ""),
-                        help="Quiver Quantitative API token (or set QUIVER_API_KEY env var). "
-                             "Free signup at https://www.quiverquant.com/")
+    parser.add_argument("--api-key", default=os.environ.get("RAPIDAPI_KEY", ""),
+                        help="RapidAPI key for Politician Trade Tracker "
+                             "(or set RAPIDAPI_KEY env var). "
+                             "Free tier at https://www.politiciantradetracker.us/")
     parser.add_argument("--top",     type=int, default=TOP_N_DEFAULT, help="Show top N members")
     parser.add_argument("--from",    dest="from_year", type=int, default=2020)
     parser.add_argument("--chamber", choices=["senate","house","both"], default="both")
@@ -344,10 +397,10 @@ def main():
 
     # ── 1. Load disclosures ───────────────────────────────────────────────────
     if not args.api_key:
-        print("\nERROR: Quiver Quantitative API key required.")
-        print("  1. Sign up free at https://www.quiverquant.com/")
-        print("  2. Run:  venv/bin/python backtest.py --api-key YOUR_TOKEN --save")
-        print("  Or set env:  export QUIVER_API_KEY=YOUR_TOKEN")
+        print("\nERROR: RapidAPI key required.")
+        print("  1. Sign up free at https://www.politiciantradetracker.us/")
+        print("  2. Run:  venv/bin/python backtest.py --api-key YOUR_KEY --save")
+        print("  Or set env:  export RAPIDAPI_KEY=YOUR_KEY")
         sys.exit(1)
 
     print("Step 1: Loading congressional disclosures…")
