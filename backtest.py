@@ -42,16 +42,18 @@ MIN_PRICE      = 5.0    # ignore penny stocks
 TOP_N_DEFAULT  = 15     # senators to include in portfolio simulation
 SIM_POSITION   = 5_000  # $ per position in portfolio simulation
 
-# Multiple URL variants — S3 bucket URLs differ by region/format
+# Data sources — tried in order until one returns valid JSON
+# Senate Stock Watcher S3 has access restrictions from some regions;
+# Capitol Trades API is a reliable fallback.
 SENATE_URLS = [
     "https://senate-stock-watcher-data.s3-us-east-2.amazonaws.com/aggregate/all_transactions.json",
-    "https://senate-stock-watcher-data.s3.amazonaws.com/aggregate/all_transactions.json",
-    "https://senate-stock-watcher-data.s3-website-us-east-1.amazonaws.com/aggregate/all_transactions.json",
+    "http://senate-stock-watcher-data.s3-website-us-east-1.amazonaws.com/aggregate/all_transactions.json",
+    "https://api.capitoltrades.com/trades?chamber=senate&page=1&pageSize=10000",
 ]
 HOUSE_URLS = [
     "https://house-stock-watcher-data.s3-us-east-2.amazonaws.com/data/all_transactions.json",
-    "https://house-stock-watcher-data.s3.amazonaws.com/data/all_transactions.json",
-    "https://house-stock-watcher-data.s3-website-us-east-1.amazonaws.com/data/all_transactions.json",
+    "http://house-stock-watcher-data.s3-website-us-east-1.amazonaws.com/data/all_transactions.json",
+    "https://api.capitoltrades.com/trades?chamber=house&page=1&pageSize=10000",
 ]
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; senator-backtest/1.0)",
@@ -82,24 +84,33 @@ def _fetch_json(urls: list[str], cache_name: str) -> list:
             pass
     for url in urls:
         try:
-            print(f"  Fetching {url} …", flush=True)
-            resp = requests.get(url, headers=HEADERS, timeout=60, allow_redirects=True)
+            print(f"  Trying {url[:80]} …", flush=True)
+            resp = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+            print(f"    HTTP {resp.status_code}, content-length={len(resp.content)}", flush=True)
             if resp.status_code != 200:
-                print(f"    HTTP {resp.status_code} — trying next URL")
+                print(f"    → skip (non-200)")
                 continue
             text = resp.text.strip()
             if not text or text[0] not in ("[", "{"):
-                print(f"    Non-JSON response (first char: {text[:50]!r}) — trying next URL")
+                print(f"    → skip (not JSON, starts with: {text[:80]!r})")
                 continue
             data = resp.json()
             if not isinstance(data, list) or len(data) == 0:
-                print(f"    Empty or unexpected format — trying next URL")
+                print(f"    → skip (empty list or wrong format)")
                 continue
+            print(f"    ✓ {len(data)} records", flush=True)
             cache_file.write_text(json.dumps(data))
             return data
+        except requests.exceptions.Timeout:
+            print(f"    → timeout after 20s — trying next URL")
         except Exception as exc:
-            print(f"    Failed: {exc} — trying next URL")
-    raise RuntimeError(f"All URLs failed for {cache_name}")
+            print(f"    → failed: {exc}")
+    raise RuntimeError(
+        f"All URLs failed for {cache_name}.\n"
+        f"Download manually and place at: {cache_file}\n"
+        f"Senate data: https://senate-stock-watcher-data.s3-us-east-2.amazonaws.com/aggregate/all_transactions.json\n"
+        f"House data:  https://house-stock-watcher-data.s3-us-east-2.amazonaws.com/data/all_transactions.json"
+    )
 
 
 def _parse_amount(s: str) -> float:
