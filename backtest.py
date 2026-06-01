@@ -42,15 +42,21 @@ MIN_PRICE      = 5.0    # ignore penny stocks
 TOP_N_DEFAULT  = 15     # senators to include in portfolio simulation
 SIM_POSITION   = 5_000  # $ per position in portfolio simulation
 
-SENATE_URL = (
-    "https://senate-stock-watcher-data.s3-us-east-2.amazonaws.com"
-    "/aggregate/all_transactions.json"
-)
-HOUSE_URL = (
-    "https://house-stock-watcher-data.s3-us-east-2.amazonaws.com"
-    "/data/all_transactions.json"
-)
-HEADERS = {"User-Agent": "senator-backtest/1.0"}
+# Multiple URL variants — S3 bucket URLs differ by region/format
+SENATE_URLS = [
+    "https://senate-stock-watcher-data.s3-us-east-2.amazonaws.com/aggregate/all_transactions.json",
+    "https://senate-stock-watcher-data.s3.amazonaws.com/aggregate/all_transactions.json",
+    "https://senate-stock-watcher-data.s3-website-us-east-1.amazonaws.com/aggregate/all_transactions.json",
+]
+HOUSE_URLS = [
+    "https://house-stock-watcher-data.s3-us-east-2.amazonaws.com/data/all_transactions.json",
+    "https://house-stock-watcher-data.s3.amazonaws.com/data/all_transactions.json",
+    "https://house-stock-watcher-data.s3-website-us-east-1.amazonaws.com/data/all_transactions.json",
+]
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; senator-backtest/1.0)",
+    "Accept": "application/json, */*",
+}
 CACHE_DIR = Path("data/cache")
 
 KNOWN_ETFS = frozenset({
@@ -63,19 +69,37 @@ KNOWN_ETFS = frozenset({
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
-def _fetch_json(url: str, cache_name: str) -> list:
+def _fetch_json(urls: list[str], cache_name: str) -> list:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file = CACHE_DIR / f"{cache_name}.json"
-    if cache_file.exists():
-        age_hours = (date.today().toordinal() - cache_file.stat().st_mtime // 86400)
-        if age_hours < 1:  # use today's cache
-            return json.loads(cache_file.read_text())
-    print(f"  Fetching {url} …", flush=True)
-    resp = requests.get(url, headers=HEADERS, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    cache_file.write_text(json.dumps(data))
-    return data
+    if cache_file.exists() and cache_file.stat().st_size > 1000:
+        try:
+            data = json.loads(cache_file.read_text())
+            if data:
+                print(f"  Using cached {cache_name} ({len(data)} records)", flush=True)
+                return data
+        except Exception:
+            pass
+    for url in urls:
+        try:
+            print(f"  Fetching {url} …", flush=True)
+            resp = requests.get(url, headers=HEADERS, timeout=60, allow_redirects=True)
+            if resp.status_code != 200:
+                print(f"    HTTP {resp.status_code} — trying next URL")
+                continue
+            text = resp.text.strip()
+            if not text or text[0] not in ("[", "{"):
+                print(f"    Non-JSON response (first char: {text[:50]!r}) — trying next URL")
+                continue
+            data = resp.json()
+            if not isinstance(data, list) or len(data) == 0:
+                print(f"    Empty or unexpected format — trying next URL")
+                continue
+            cache_file.write_text(json.dumps(data))
+            return data
+        except Exception as exc:
+            print(f"    Failed: {exc} — trying next URL")
+    raise RuntimeError(f"All URLs failed for {cache_name}")
 
 
 def _parse_amount(s: str) -> float:
@@ -112,7 +136,7 @@ def load_disclosures(chamber: str = "both") -> pd.DataFrame:
 
     if chamber in ("senate", "both"):
         try:
-            senate_raw = _fetch_json(SENATE_URL, "senate_all")
+            senate_raw = _fetch_json(SENATE_URLS, "senate_all")
             for r in senate_raw:
                 txn = str(r.get("type", "")).lower()
                 if "purchase" not in txn and "buy" not in txn:
@@ -141,7 +165,7 @@ def load_disclosures(chamber: str = "both") -> pd.DataFrame:
     if chamber in ("house", "both"):
         before = len(rows)
         try:
-            house_raw = _fetch_json(HOUSE_URL, "house_all")
+            house_raw = _fetch_json(HOUSE_URLS, "house_all")
             for r in house_raw:
                 txn = str(r.get("type", "")).lower()
                 if "purchase" not in txn and "buy" not in txn:
@@ -167,6 +191,8 @@ def load_disclosures(chamber: str = "both") -> pd.DataFrame:
         except Exception as e:
             print(f"  House fetch failed: {e}", file=sys.stderr)
 
+    if not rows:
+        raise RuntimeError("No disclosures loaded — all data sources failed. Check network/URLs.")
     df = pd.DataFrame(rows)
     df = df[df["amount_mid"] >= MIN_TRADE_USD].copy()
     df["disclosure_date"] = pd.to_datetime(df["disclosure_date"])
