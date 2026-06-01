@@ -102,8 +102,11 @@ def _fetch_by_type(api_key: str, trade_type: str = "purchase") -> list:
         data = data.get("trades", data.get("data", data.get("results", [])))
     if not isinstance(data, list):
         raise RuntimeError(f"Unexpected format: {type(data)} — {str(data)[:200]}")
-    print(f"  ✓ {len(data)} {trade_type} records", flush=True)
-    cache_file.write_text(json.dumps(data))
+    if len(data) == 0:
+        print(f"  WARNING: 0 records returned. Raw response: {resp.text[:300]}", flush=True)
+    else:
+        print(f"  ✓ {len(data)} {trade_type} records", flush=True)
+        cache_file.write_text(json.dumps(data))
     return data
 
 
@@ -150,9 +153,9 @@ def _normalise_record(r: dict, chamber_label: str) -> dict | None:
     if sym in KNOWN_ETFS:
         return None
 
-    # Transaction type — keep only purchases
+    # Transaction type — keep only purchases/buys
     txn = str(r.get("trade_type") or r.get("type") or r.get("transaction") or "").lower()
-    if "purchase" not in txn and "buy" not in txn:
+    if not any(kw in txn for kw in ("purchase", "buy")):
         return None
 
     # Politician name
@@ -186,7 +189,8 @@ def _normalise_record(r: dict, chamber_label: str) -> dict | None:
 
 def load_disclosures(api_key: str, chamber: str = "both") -> pd.DataFrame:
     # Single call gets all purchases across both chambers
-    raw = _fetch_by_type(api_key, trade_type="purchase")
+    # API uses "buy"/"sell" (lowercase), not "purchase"/"sale"
+    raw = _fetch_by_type(api_key, trade_type="buy")
     if raw:
         print(f"  Sample record keys: {list(raw[0].keys())[:12]}", flush=True)
 
