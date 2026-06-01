@@ -46,12 +46,12 @@ SIM_POSITION   = 5_000  # $ per position in portfolio simulation
 # Senate Stock Watcher S3 has access restrictions from some regions;
 # Capitol Trades API is a reliable fallback.
 SENATE_URLS = [
+    "http://senate-stock-watcher-data.s3-website-us-west-2.amazonaws.com/aggregate/all_transactions.json",
     "https://senate-stock-watcher-data.s3.us-west-2.amazonaws.com/aggregate/all_transactions.json",
-    "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json",
 ]
 HOUSE_URLS = [
+    "http://house-stock-watcher-data.s3-website-us-west-2.amazonaws.com/data/all_transactions.json",
     "https://house-stock-watcher-data.s3.us-west-2.amazonaws.com/data/all_transactions.json",
-    "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
 ]
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; senator-backtest/1.0)",
