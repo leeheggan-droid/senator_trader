@@ -88,7 +88,7 @@ def _fetch_chamber(api_key: str, chamber: str) -> list:
     resp = requests.get(
         TRADES_BY_CHAMBER_URL,
         headers=_rapidapi_headers(api_key),
-        params={"chamber": chamber},
+        params={"chamber": chamber, "limit": 10000},
         timeout=60,
     )
     if resp.status_code == 401:
@@ -153,19 +153,19 @@ def _normalise_record(r: dict, chamber_label: str) -> dict | None:
         return None
 
     # Transaction type — keep only purchases
-    txn = str(r.get("type") or r.get("transaction") or r.get("transaction_type") or "").lower()
+    txn = str(r.get("trade_type") or r.get("type") or r.get("transaction") or "").lower()
     if "purchase" not in txn and "buy" not in txn:
         return None
 
     # Politician name
     name = str(
-        r.get("politician") or r.get("name") or r.get("senator") or
+        r.get("name") or r.get("politician") or r.get("senator") or
         r.get("representative") or r.get("member") or ""
     ).strip()
 
-    # Date (use disclosure date if available, else transaction date)
+    # Date — use trade_date; days_until_disclosure field tells us the lag
     date_str = str(
-        r.get("disclosure_date") or r.get("filed_at") or
+        r.get("trade_date") or r.get("disclosure_date") or
         r.get("transaction_date") or r.get("date") or ""
     )
     disc_dt = _parse_date(date_str)
@@ -173,7 +173,7 @@ def _normalise_record(r: dict, chamber_label: str) -> dict | None:
         return None
 
     # Amount
-    amount_str = str(r.get("amount") or r.get("range") or r.get("estimated_value") or "")
+    amount_str = str(r.get("trade_amount") or r.get("amount") or r.get("range") or "")
     amount_mid = _parse_amount(amount_str)
 
     return {
