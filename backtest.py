@@ -47,6 +47,7 @@ SIM_POSITION   = 5_000  # $ per position in portfolio simulation
 # Sign up free (60 req/mo) at https://www.politiciantradetracker.us/
 # Set via --api-key or RAPIDAPI_KEY env var.
 RAPIDAPI_HOST = "politician-trade-tracker1.p.rapidapi.com"
+TRADES_BY_TYPE_URL    = f"https://{RAPIDAPI_HOST}/trades/type"
 TRADES_BY_CHAMBER_URL = f"https://{RAPIDAPI_HOST}/trades/chamber"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; senator-backtest/1.0)",
@@ -72,39 +73,36 @@ def _rapidapi_headers(api_key: str) -> dict:
     }
 
 
-def _fetch_chamber(api_key: str, chamber: str) -> list:
-    """Fetch all trades for one chamber, with cache."""
+def _fetch_by_type(api_key: str, trade_type: str = "purchase") -> list:
+    """Fetch all trades of a given type across both chambers — one API call."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = CACHE_DIR / f"trades_{chamber}.json"
+    cache_file = CACHE_DIR / f"trades_type_{trade_type}.json"
     if cache_file.exists() and cache_file.stat().st_size > 5_000:
         try:
             data = json.loads(cache_file.read_text())
             if data:
-                print(f"  Using cached {chamber} data ({len(data)} records)", flush=True)
+                print(f"  Using cached {trade_type} data ({len(data)} records)", flush=True)
                 return data
         except Exception:
             pass
-    print(f"  Fetching {chamber} trades from Politician Trade Tracker …", flush=True)
+    print(f"  Fetching {trade_type} trades from Politician Trade Tracker …", flush=True)
     resp = requests.get(
-        TRADES_BY_CHAMBER_URL,
+        TRADES_BY_TYPE_URL,
         headers=_rapidapi_headers(api_key),
-        params={"chamber": chamber, "limit": 10000},
+        params={"trade_type": trade_type, "limit": 10000},
         timeout=60,
     )
     if resp.status_code == 401:
-        raise RuntimeError(
-            "API key invalid — check your RapidAPI key and re-run with --api-key KEY"
-        )
+        raise RuntimeError("API key invalid — re-run with --api-key KEY")
     if resp.status_code == 429:
-        raise RuntimeError("Rate limit hit — 60 requests/month on free tier. Try again tomorrow.")
+        raise RuntimeError("Rate limit hit — 60 requests/month on free tier.")
     resp.raise_for_status()
     data = resp.json()
-    # API may return a dict with a list inside, or a bare list
     if isinstance(data, dict):
         data = data.get("trades", data.get("data", data.get("results", [])))
     if not isinstance(data, list):
-        raise RuntimeError(f"Unexpected response format: {type(data)} — {str(data)[:200]}")
-    print(f"  ✓ {len(data)} {chamber} records", flush=True)
+        raise RuntimeError(f"Unexpected format: {type(data)} — {str(data)[:200]}")
+    print(f"  ✓ {len(data)} {trade_type} records", flush=True)
     cache_file.write_text(json.dumps(data))
     return data
 
@@ -187,22 +185,22 @@ def _normalise_record(r: dict, chamber_label: str) -> dict | None:
 
 
 def load_disclosures(api_key: str, chamber: str = "both") -> pd.DataFrame:
-    chambers = []
-    if chamber in ("senate", "both"):
-        chambers.append(("Senate", "senate"))
-    if chamber in ("house", "both"):
-        chambers.append(("House", "house"))
+    # Single call gets all purchases across both chambers
+    raw = _fetch_by_type(api_key, trade_type="purchase")
+    if raw:
+        print(f"  Sample record keys: {list(raw[0].keys())[:12]}", flush=True)
 
     rows = []
-    for api_chamber, label in chambers:
-        raw = _fetch_chamber(api_key, api_chamber)
-        if raw:
-            # Print first record so we can see the actual field names
-            print(f"  Sample {label} record keys: {list(raw[0].keys())[:12]}", flush=True)
-        for r in raw:
-            norm = _normalise_record(r, label)
-            if norm:
-                rows.append(norm)
+    for r in raw:
+        ch_raw = str(r.get("chamber", "")).lower()
+        if chamber == "senate" and "senate" not in ch_raw:
+            continue
+        if chamber == "house" and "house" not in ch_raw:
+            continue
+        label = "senate" if "senate" in ch_raw else "house"
+        norm = _normalise_record(r, label)
+        if norm:
+            rows.append(norm)
 
     if not rows:
         raise RuntimeError(
