@@ -6,14 +6,12 @@ set -e
 mkdir -p data/cache
 
 SENATE_URLS=(
-  "https://senate-stock-watcher-data.s3.us-east-1.amazonaws.com/aggregate/all_transactions.json"
-  "https://senate-stock-watcher-data.s3-us-east-2.amazonaws.com/aggregate/all_transactions.json"
-  "https://senate-stock-watcher-data.s3.amazonaws.com/aggregate/all_transactions.json"
+  "https://senate-stock-watcher-data.s3.us-west-2.amazonaws.com/aggregate/all_transactions.json"
+  "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json"
 )
 HOUSE_URLS=(
-  "https://house-stock-watcher-data.s3.us-east-1.amazonaws.com/data/all_transactions.json"
-  "https://house-stock-watcher-data.s3-us-east-2.amazonaws.com/data/all_transactions.json"
-  "https://house-stock-watcher-data.s3.amazonaws.com/data/all_transactions.json"
+  "https://house-stock-watcher-data.s3.us-west-2.amazonaws.com/data/all_transactions.json"
+  "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json"
 )
 
 download_first() {
