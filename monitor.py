@@ -154,7 +154,10 @@ def _get_price(tc, symbol: str) -> Optional[float]:
         dc  = StockHistoricalDataClient(
             os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"])
         bar = dc.get_stock_latest_bar(StockLatestBarRequest(symbol_or_symbols=symbol))
-        return float(bar[symbol].c) if bar and symbol in bar else None
+        if bar and symbol in bar:
+            b = bar[symbol]
+            return float(getattr(b, "close", None) or getattr(b, "c", None) or 0) or None
+        return None
     except Exception as exc:
         log.warning("Price fetch failed for %s: %s", symbol, exc)
         return None
