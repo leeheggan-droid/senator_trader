@@ -24,11 +24,12 @@ import json
 import logging
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import pytz
 import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -76,6 +77,19 @@ WATCHLIST_NAMES = [
 def _on_watchlist(name: str) -> bool:
     n = name.lower().strip()
     return any(w in n or n in w for w in WATCHLIST_NAMES)
+
+
+def is_market_open() -> bool:
+    """Check if US stock market is currently open (Mon-Fri 09:30-16:00 ET)."""
+    et = pytz.timezone("US/Eastern")
+    now = datetime.now(et)
+    # Market closed on weekends (5=Sat, 6=Sun)
+    if now.weekday() >= 5:
+        return False
+    # Market hours: 09:30-16:00 ET
+    market_open = time(9, 30)
+    market_close = time(16, 0)
+    return market_open <= now.time() < market_close
 
 
 # ── State helpers ─────────────────────────────────────────────────────────────
@@ -382,7 +396,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true",
                         help="Check signals and exits but don't place orders")
+    parser.add_argument("--force", action="store_true",
+                        help="Run even if market is closed (testing)")
     args = parser.parse_args()
+
+    # Skip if market is closed (unless --force)
+    if not args.force and not is_market_open():
+        log.info("Market closed, skipping check")
+        return
 
     rapidapi_key = os.environ.get("RAPIDAPI_KEY", "")
     if not rapidapi_key:

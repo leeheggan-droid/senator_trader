@@ -1,0 +1,13 @@
+[Unit]
+Description=Senator Trade Monitor (intraday exit checks)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jacks
+WorkingDirectory=/home/jacks/senator_trader
+EnvironmentFile=/etc/senator_trader.env
+ExecStart=/home/jacks/senator_trader/venv/bin/python monitor.py
+StandardOutput=journal
+StandardError=journal

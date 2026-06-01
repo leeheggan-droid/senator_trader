@@ -1,0 +1,10 @@
+[Unit]
+Description=Senator Trade Monitor (intraday) — every 15 min during market hours
+Requires=senator_trader_intraday.service
+
+[Timer]
+OnCalendar=*:0/15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
