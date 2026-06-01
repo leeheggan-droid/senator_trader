@@ -38,7 +38,7 @@ import yfinance as yf
 ENTRY_LAG_DAYS = 7      # trading days after disclosure before we enter
 HOLD_DAYS      = 30     # calendar days to hold
 STOP_PCT       = 0.10   # stop loss at 10% below entry
-MIN_TRADE_USD  = 15_001 # ignore < $15k disclosed trades (senators report in ranges)
+MIN_TRADE_USD  = 0      # temporarily 0 to see raw data volume; raise to 15_001 after
 MIN_PRICE      = 5.0    # ignore penny stocks
 TOP_N_DEFAULT  = 15     # senators to include in portfolio simulation
 SIM_POSITION   = 5_000  # $ per position in portfolio simulation
@@ -193,6 +193,13 @@ def load_disclosures(api_key: str, chamber: str = "both") -> pd.DataFrame:
     raw = _fetch_by_type(api_key, trade_type="buy")
     if raw:
         print(f"  Sample record keys: {list(raw[0].keys())[:12]}", flush=True)
+
+    # Debug: show first 3 records raw to verify field values
+    for r in raw[:3]:
+        print(f"  DEBUG: trade_amount={r.get('trade_amount')!r} "
+              f"value_at_purchase={r.get('value_at_purchase')!r} "
+              f"chamber={r.get('chamber')!r} "
+              f"trade_type={r.get('trade_type')!r}", flush=True)
 
     rows = []
     for r in raw:
